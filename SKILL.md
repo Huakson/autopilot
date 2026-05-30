@@ -33,6 +33,17 @@ Extended with **budget guards** (90% daily / 80% weekly).
 - `tick` → **TICK** (this is what the cron fires)
 - `stop` → **STOP**
 - `status` → **STATUS**
+- `knowledge ...` → **KNOWLEDGE** (static curated knowledge base)
+
+## Memory model (two complementary layers)
+- **Knowledge base (local, always on)**: static curated facts that must NOT be
+  lost — how to start the stack, how to use NATS, gotchas, conventions. Stored as
+  markdown files on disk. Both the human AND Claude fill it. The tick reads it so
+  the loop "remembers". See KNOWLEDGE.
+- **claude-mem (MCP, optional)**: cross-session dynamic memory via the claude-mem
+  MCP tools. Enabled at SETUP (asks yes/no). When on, the tick also
+  searches/saves memories there. Augments the local knowledge base; does NOT
+  replace it.
 
 ---
 
@@ -65,13 +76,20 @@ Extended with **budget guards** (90% daily / 80% weekly).
      or detect from the repo (package.json scripts, go.mod, pytest, etc).
    - Fixed by design: stop at **90%** of daily, cap at **80%** of weekly,
      **1 fix/tick**, integration via **isolated branch** (no merge).
+   - **claude-mem (optional)**: ask the user "Use claude-mem (MCP) for
+     cross-session memory? [y/N]". If yes, pass `--use-claude-mem` to `init` and
+     the tick will search/save memories there too. If the claude-mem MCP isn't
+     available, fall back to local knowledge only.
    > Unit = **tokens measured from the transcript** (input+output+cache_creation,
    > summed across all session `.jsonl`). Tune the caps to your plan. cache_read
    > is ignored by default (inflated by re-read context).
+   - **Seed the knowledge base**: offer to capture key local know-how now
+     (how to start the stack / run tests / use NATS, etc) via
+     `knowledge add` — so the loop has it from tick 1.
 2. **Clean tree + branch**: confirm `git status` clean; create the branch from
    the default branch: `git switch <default> && git switch -c autopilot/<YYYY-MM-DD-HHMM>`.
 3. **Init state**:
-   `python3 $ENGINE init --daily <D> --weekly <W> --cron "<CRON>" --branch <NAME> --target "<cmd1>" --target "<cmd2>"`
+   `python3 $ENGINE init --daily <D> --weekly <W> --cron "<CRON>" --branch <NAME> --target "<cmd1>" --target "<cmd2>" [--use-claude-mem]`
 4. **Arm the cron**: `CronCreate(cron="<CRON>", prompt="/autopilot tick", recurring=true)`.
    Take the returned `job id` and store it: `python3 $ENGINE set-cron --cron-job-id <ID>`.
    > A recurring cron auto-expires in 7 days. It dies if the session dies — see RESUME.
@@ -83,6 +101,10 @@ Extended with **budget guards** (90% daily / 80% weekly).
 
 ## TICK  (what the cron fires — self-contained)
 
+0. **Recall**: `python3 $ENGINE knowledge list` (and `knowledge get <id>` for the
+   relevant ones) so you remember how to start the stack / run things / known
+   gotchas. If `config.use_claude_mem` is true, also do a claude-mem
+   `memory_search` for the area you're about to touch.
 1. **Gate**: `python3 $ENGINE gate`
    → read the JSON `{verdict, reason, daily_pct_used, weekly_pct_used, branch, cron_job_id, targets, ticks, ...}`.
 2. If `verdict == "stop"`:
@@ -97,7 +119,11 @@ Extended with **budget guards** (90% daily / 80% weekly).
       - **Failed / bug** → use the `systematic-debugging` discipline → fix the root
         cause → re-run until **green** → commit (repo style) → `git push origin <branch>`
         → `python3 $ENGINE log --note "fix: <summary>" --bug --fixed --commit <sha>`.
-   4. **1 fix per tick.** End.
+   4. **Capture durable lessons**: if you learned something that must not be lost
+      (a setup step, a gotcha, a non-obvious fix), save it:
+      `python3 $ENGINE knowledge add --by claude --title "..." --tags "..." --body "..."`.
+      If `config.use_claude_mem`, also `memory_add` it to claude-mem.
+   5. **1 fix per tick.** End.
 4. **Do not re-arm the cron** (it's already recurring). The tick just executes.
 
 ---
@@ -110,6 +136,23 @@ Extended with **budget guards** (90% daily / 80% weekly).
 ## STATUS
 `python3 $ENGINE status` → summarize in 1 paragraph: status, branch, ticks, bugs
 found/fixed, % of daily and weekly budget used.
+
+## KNOWLEDGE  (`/autopilot knowledge ...`)
+
+Static curated knowledge that must not be lost — usable by the human AND by you
+(Claude) so future ticks remember. Backed by markdown files on disk.
+
+- `list` → `python3 $ENGINE knowledge list`
+- `add`  → `python3 $ENGINE knowledge add --title "..." [--tags "a,b"] [--by user|claude] --body "..."`
+           (omit `--body` or pass `--body -` to read from stdin — good for long text)
+- `get`  → `python3 $ENGINE knowledge get <id>`
+- `search` → `python3 $ENGINE knowledge search "<query>"`
+- `rm`   → `python3 $ENGINE knowledge rm <id>`
+
+When the user says "remember that ...", "save this", or "/autopilot knowledge add",
+write an entry. When YOU learn something durable during a tick, save it with
+`--by claude`. Examples worth saving: how to start the stack with docker compose,
+how to use NATS, DB names/ports, test commands, recurring gotchas.
 
 ## RESUME (session died and was reopened)
 The state persists, but the cron dies with the session. On reopen, to continue:

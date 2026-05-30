@@ -97,6 +97,58 @@ re-arms the cron if needed.
 
 ---
 
+## Memory: two complementary layers
+
+The loop has to **remember things between ticks and across sessions** — how to
+start the stack, how to use NATS, gotchas, a non-obvious fix. Two layers:
+
+### 1. Knowledge base (local, always on)
+
+Static **curated** facts that must NOT be lost, stored as plain markdown files on
+disk (`.claude/autopilot/knowledge/*.md`). **Both you AND Claude fill it** — Claude
+writes durable lessons during ticks (`--by claude`); you write setup know-how
+(`--by user`). Each tick reads it first, so the loop keeps its memory even on a
+fresh session.
+
+```bash
+ENGINE=~/.claude/skills/autopilot/scripts/autopilot.py
+
+# add (inline body)
+python3 $ENGINE knowledge add --by user --title "Start the stack" --tags "docker,stack" \
+  --body "docker compose --env-file dev.env -f infra.yml -f compose.yml up -d"
+
+# add (long body from stdin)
+cat NOTES.md | python3 $ENGINE knowledge add --by user --title "How to use NATS" --tags "nats"
+
+python3 $ENGINE knowledge list            # what the loop knows
+python3 $ENGINE knowledge get <id>        # full entry
+python3 $ENGINE knowledge search "nats"   # find by title/tags/body
+python3 $ENGINE knowledge rm <id>         # delete
+```
+
+In Claude Code you can also drive it conversationally: `/autopilot knowledge list`,
+`/autopilot knowledge add ...`. Entries are human-readable markdown with a tiny
+frontmatter (`id, title, tags, by, ts`), so they're easy to review and version if
+you want (or keep them gitignored like the rest of the runtime state).
+
+### 2. claude-mem (MCP, optional)
+
+If you use [claude-mem](https://github.com/thedotmack/claude-mem) (cross-session
+dynamic memory via MCP), autopilot can use it too. At **setup** it asks
+*"Use claude-mem for cross-session memory? [y/N]"*. If yes (`--use-claude-mem`),
+each tick also `memory_search`es the area it's about to touch and `memory_add`s
+durable lessons — **on top of** the local knowledge base, not replacing it. If the
+claude-mem MCP isn't available, it silently falls back to local knowledge only.
+
+| | Knowledge base | claude-mem |
+|---|---|---|
+| Storage | local markdown on disk | MCP server (cross-session DB) |
+| Always on? | yes | optional (asked at setup) |
+| Who writes | human + Claude | Claude (auto) |
+| Best for | curated how-tos, conventions, gotchas | dynamic recall across many sessions |
+
+---
+
 ## Install
 
 The skill must live in `~/.claude/skills/autopilot/` (user-level, available in any
@@ -134,6 +186,10 @@ It asks (or uses defaults):
 - cron (default `0 * * * *` = hourly)
 - **targets**: the commands to run each tick (e.g. `go test ./...`, `npm test`,
   `pytest -q`, a Playwright spec, a key user flow)
+- **claude-mem**: whether to use the claude-mem MCP for cross-session memory
+  (asked `[y/N]`; see [Memory](#memory-two-complementary-layers))
+- it also offers to **seed the knowledge base** with key local know-how (how to
+  start the stack / run tests / use NATS) so the loop has it from tick 1
 
 Then it: confirms a clean tree → creates branch `autopilot/<date-time>` → writes
 the state → arms the cron → runs the first tick.
@@ -173,6 +229,13 @@ python3 $ENGINE log --note "fix: X" --bug --fixed --commit abc123
 python3 $ENGINE status
 python3 $ENGINE stop --reason "manual"
 python3 $ENGINE set-cron --cron-job-id <id>
+
+# knowledge base (curated facts; see the Memory section)
+python3 $ENGINE knowledge add --by user --title "..." --tags "a,b" --body "..."
+python3 $ENGINE knowledge list
+python3 $ENGINE knowledge get <id>
+python3 $ENGINE knowledge search "<query>"
+python3 $ENGINE knowledge rm <id>
 ```
 
 Default state path: `./.claude/autopilot/state.json` (override with `--state`).

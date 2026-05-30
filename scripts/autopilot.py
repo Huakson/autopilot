@@ -27,12 +27,14 @@ turn). Use --include-cache-read to add it.
 import argparse
 import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import re
 import sys
 
 DEFAULT_STATE = os.path.join(os.getcwd(), ".claude", "autopilot", "state.json")
+DEFAULT_KNOWLEDGE_DIR = os.path.join(os.getcwd(), ".claude", "autopilot", "knowledge")
 
 
 def transcript_dir() -> str:
@@ -123,6 +125,7 @@ def cmd_init(args) -> int:
             "max_fixes_per_tick": args.max_fixes_per_tick,
             "include_cache_read": bool(args.include_cache_read),
             "targets": args.target or [],
+            "use_claude_mem": bool(args.use_claude_mem),
         },
         "counters": {"ticks": 0, "bugs_found": 0, "bugs_fixed": 0},
         "budget": {
@@ -255,6 +258,121 @@ def cmd_set_cron(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------
+# Knowledge base — static curated knowledge that must not be lost.
+# Each entry is a markdown file with a tiny frontmatter, stored on disk.
+# Both the human and Claude Code can add entries; the tick reads them so the
+# loop "remembers" things like how to start the stack, use NATS, etc.
+# ----------------------------------------------------------------------------
+
+def _slugify(title: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return (s or "note")[:40]
+
+
+def _entry_id(title: str, ts: str) -> str:
+    h = hashlib.sha1((title + "|" + ts).encode("utf-8")).hexdigest()[:6]
+    return f"{_slugify(title)}-{h}"
+
+
+def _parse_md(path: str):
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    meta, body = {}, text
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            for line in parts[1].strip().splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            body = parts[2].lstrip("\n")
+    return meta, body
+
+
+def _knowledge_files(d: str):
+    return sorted(glob.glob(os.path.join(d, "*.md")))
+
+
+def cmd_knowledge(args) -> int:
+    d = args.dir
+    sub = args.kn_cmd
+
+    if sub == "add":
+        os.makedirs(d, exist_ok=True)
+        body = args.body
+        if body is None or body == "-":
+            body = sys.stdin.read()
+        ts = now_utc().isoformat()
+        eid = _entry_id(args.title, ts)
+        tags = args.tags or ""
+        path = os.path.join(d, eid + ".md")
+        fm = (
+            "---\n"
+            f"id: {eid}\n"
+            f"title: {args.title}\n"
+            f"tags: {tags}\n"
+            f"by: {args.by}\n"
+            f"ts: {ts}\n"
+            "---\n\n"
+        )
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fm + (body.rstrip() + "\n"))
+        print(json.dumps({"ok": True, "id": eid, "path": path}, ensure_ascii=False))
+        return 0
+
+    if sub == "list":
+        items = []
+        for p in _knowledge_files(d):
+            meta, _ = _parse_md(p)
+            items.append({
+                "id": meta.get("id", os.path.splitext(os.path.basename(p))[0]),
+                "title": meta.get("title", ""),
+                "tags": meta.get("tags", ""),
+                "by": meta.get("by", ""),
+                "ts": meta.get("ts", ""),
+            })
+        print(json.dumps({"count": len(items), "items": items}, indent=2, ensure_ascii=False))
+        return 0
+
+    if sub == "get":
+        for p in _knowledge_files(d):
+            stem = os.path.splitext(os.path.basename(p))[0]
+            meta, _ = _parse_md(p)
+            if stem == args.id or meta.get("id") == args.id:
+                with open(p, "r", encoding="utf-8") as fh:
+                    sys.stdout.write(fh.read())
+                return 0
+        print(f"not found: {args.id}", file=sys.stderr)
+        return 1
+
+    if sub == "rm":
+        for p in _knowledge_files(d):
+            stem = os.path.splitext(os.path.basename(p))[0]
+            meta, _ = _parse_md(p)
+            if stem == args.id or meta.get("id") == args.id:
+                os.remove(p)
+                print(json.dumps({"ok": True, "removed": args.id}, ensure_ascii=False))
+                return 0
+        print(f"not found: {args.id}", file=sys.stderr)
+        return 1
+
+    if sub == "search":
+        q = args.query.lower()
+        hits = []
+        for p in _knowledge_files(d):
+            meta, body = _parse_md(p)
+            blob = (meta.get("title", "") + " " + meta.get("tags", "") + " " + body).lower()
+            if q in blob:
+                hits.append({"id": meta.get("id"), "title": meta.get("title", ""),
+                             "tags": meta.get("tags", "")})
+        print(json.dumps({"count": len(hits), "items": hits}, indent=2, ensure_ascii=False))
+        return 0
+
+    print("unknown knowledge subcommand", file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="autopilot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -270,6 +388,7 @@ def main() -> int:
     pi.add_argument("--target", action="append", default=[])
     pi.add_argument("--cron-job-id", default="")
     pi.add_argument("--include-cache-read", action="store_true")
+    pi.add_argument("--use-claude-mem", action="store_true")
     pi.add_argument("--state", default=DEFAULT_STATE)
     pi.set_defaults(func=cmd_init)
 
@@ -302,6 +421,27 @@ def main() -> int:
     pc.add_argument("--cron-job-id", required=True)
     pc.add_argument("--state", default=DEFAULT_STATE)
     pc.set_defaults(func=cmd_set_cron)
+
+    pk = sub.add_parser("knowledge", help="base de conhecimento estático local")
+    ksub = pk.add_subparsers(dest="kn_cmd", required=True)
+    ka = ksub.add_parser("add")
+    ka.add_argument("--title", required=True)
+    ka.add_argument("--body", default=None, help="texto; '-' ou omitido = lê do stdin")
+    ka.add_argument("--tags", default="")
+    ka.add_argument("--by", default="user", choices=["user", "claude"])
+    ka.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
+    kl = ksub.add_parser("list")
+    kl.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
+    kg = ksub.add_parser("get")
+    kg.add_argument("id")
+    kg.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
+    kr = ksub.add_parser("rm")
+    kr.add_argument("id")
+    kr.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
+    kse = ksub.add_parser("search")
+    kse.add_argument("query")
+    kse.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
+    pk.set_defaults(func=cmd_knowledge)
 
     args = p.parse_args()
     if not hasattr(args, "include_cache_read"):
