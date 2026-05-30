@@ -1,114 +1,114 @@
 # autopilot
 
-**Skill do Claude Code pra rodar autônomo por longos períodos** — testando a
-app, achando e corrigindo bugs sozinho, commitando numa branch isolada, com
-**guarda de budget** que **para em 90% do teto diário de tokens** e **limita a
-80% do teto semanal**.
+**A Claude Code skill that runs autonomously for long stretches** — testing your
+app, finding and fixing bugs on its own, committing to an isolated branch, with a
+**budget guard** that **stops at 90% of your daily token cap** and **limits to 80%
+of the weekly cap**.
 
-Inspirado no padrão de [@brunobertolini](https://gist.github.com/brunobertolini/d583141b9909909eeaba6273ff87cdc0)
-(state file no disco + prompt self-contained disparado por cron + skills de
-dogfood), com a adição das **guardas de budget**.
+Inspired by [@brunobertolini](https://gist.github.com/brunobertolini/d583141b9909909eeaba6273ff87cdc0)'s
+pattern (on-disk state file + self-contained prompt fired by cron + dogfooding
+skills), with **budget guards** added on top.
 
 ---
 
 ## TL;DR
 
 ```
-/autopilot setup     # configura tetos + targets, cria branch, arma o cron, roda o 1º tick
-/autopilot status    # status, ticks, bugs, % do budget diário/semanal
-/autopilot stop      # mata o cron e para
+/autopilot setup     # configure caps + targets, create branch, arm the cron, run the first tick
+/autopilot status    # status, ticks, bugs, % of daily/weekly budget
+/autopilot stop      # kill the cron and stop
 ```
 
-O cron dispara `/autopilot tick` de hora em hora. Cada tick: roda 1 target →
-acha bug → corrige → commita/pusha na branch do autopilot → **para quando o
-budget estoura**. Você faz o merge depois.
+The cron fires `/autopilot tick` hourly. Each tick: run one target → find a bug →
+fix it → commit/push to the autopilot branch → **stop when the budget is
+exhausted**. You merge later.
 
 ---
 
-## Como funciona (arquitetura)
+## How it works (architecture)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  cron (CronCreate, recorrente)  ──fires──▶  "/autopilot tick" │
+│  cron (CronCreate, recurring)  ──fires──▶  "/autopilot tick"  │
 └──────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
    ┌───────────────────────────────────────────────────────────┐
-   │  SKILL.md (o "cérebro" — o modelo segue os passos)         │
-   │   1. gate  → autopilot.py mede tokens + decide continue/stop│
-   │   2. se stop → CronDelete + report + FIM                   │
-   │   3. se continue → roda 1 target → fix → commit/push       │
+   │  SKILL.md (the "brain" — the model follows the steps)      │
+   │   1. gate  → autopilot.py measures tokens + decides         │
+   │   2. if stop → CronDelete + report + END                   │
+   │   3. if continue → run 1 target → fix → commit/push        │
    └───────────────────────────────────────────────────────────┘
                                    │
                 ┌──────────────────┴───────────────────┐
                 ▼                                       ▼
    ┌────────────────────────┐            ┌──────────────────────────┐
    │ scripts/autopilot.py   │            │ .claude/autopilot/        │
-   │ (motor determinístico) │◀──lê/grava─│ state.json (fonte de     │
-   │  - mede tokens         │            │ verdade; sobrevive a      │
-   │  - budget + rollover   │            │ morte/resume da sessão)   │
+   │ (deterministic engine) │◀──read/────│ state.json (source of    │
+   │  - measures tokens     │    write   │ truth; survives session  │
+   │  - budget + rollover   │            │ death/resume)            │
    │  - gate verdict        │            └──────────────────────────┘
    └───────────┬────────────┘
-               │ lê
+               │ reads
                ▼
-   ~/.claude/projects/<cwd-encoded>/*.jsonl   (transcripts da sessão)
+   ~/.claude/projects/<cwd-encoded>/*.jsonl   (session transcripts)
 ```
 
-**3 peças:**
-- **`SKILL.md`** — o que o Claude faz em cada modo (setup/tick/stop/status). É
-  texto; o modelo segue.
-- **`scripts/autopilot.py`** — motor determinístico. **Toda aritmética de budget
-  e contagem de token vive aqui** (o modelo não conta token na mão).
-- **`.claude/autopilot/state.json`** — fonte de verdade no disco. Persiste config,
-  contadores, checkpoints de budget e log. Sobrevive à morte da sessão (resume).
+**3 pieces:**
+- **`SKILL.md`** — what Claude does in each mode (setup/tick/stop/status). It's
+  text; the model follows it.
+- **`scripts/autopilot.py`** — the deterministic engine. **All budget arithmetic
+  and token counting live here** (the model never counts tokens by hand).
+- **`.claude/autopilot/state.json`** — on-disk source of truth. Persists config,
+  counters, budget checkpoints, and a log. Survives session death (resume).
 
-**Por que funciona com sessão morrendo:** o cron morre junto com a sessão, mas o
-`state.json` persiste. Reabriu? `/autopilot tick` retoma do estado salvo e re-arma
-o cron se preciso.
-
----
-
-## Guardas de budget (o diferencial)
-
-- **Unidade:** tokens medidos dos transcripts `.jsonl` da sessão
-  (`input + output + cache_creation` por mensagem, somados em todos os arquivos).
-  `cache_read` é **ignorado por default** (é barato e infla por causa do contexto
-  relido a cada turno; some com `--include-cache-read` se quiser).
-- **Diário:** ao bater **90%** do `daily_budget_tokens` → **PARA**.
-- **Semanal:** ao bater **80%** do `weekly_budget_tokens` → **PARA**.
-- **Rollover automático:** vira o dia/semana → checkpoint reseta sozinho.
-- Determinístico: `autopilot.py gate` calcula e devolve `{"verdict":"continue|stop"}`.
-
-> Ajuste os tetos à realidade do seu plano. Não dá pra ler a % real do rate-limit
-> da conta Anthropic de dentro do Claude Code — por isso o budget é medido
-> **localmente** contra um número que você define.
+**Why it survives a dying session:** the cron dies with the session, but
+`state.json` persists. Reopened? `/autopilot tick` resumes from saved state and
+re-arms the cron if needed.
 
 ---
 
-## Safety (regras invioláveis)
+## Budget guards (the differentiator)
 
-- **Nunca** faz merge na branch default. **Nunca** force-push. Só commita/pusha na
-  branch `autopilot/<timestamp>` — **você faz o merge**.
-- **1 fix por tick** (custo bounded).
-- **Kill switch:** `status=stopped` para tudo. `/autopilot stop` mata o cron.
-- Respeita as convenções do repo (estilo de commit, CLAUDE.md/AGENTS.md).
-- Nunca toca em segredos / `.env` / produção. Só stack/DB local.
-- Para sozinho se ver algo estranho (burn anômalo, erro repetido sem progresso).
+- **Unit:** tokens measured from the session `.jsonl` transcripts
+  (`input + output + cache_creation` per message, summed across all files).
+  `cache_read` is **ignored by default** (it's cheap and inflated by the context
+  re-read every turn; add it with `--include-cache-read`).
+- **Daily:** when it hits **90%** of `daily_budget_tokens` → **STOP**.
+- **Weekly:** when it hits **80%** of `weekly_budget_tokens` → **STOP**.
+- **Automatic rollover:** day/week turns over → checkpoint resets on its own.
+- Deterministic: `autopilot.py gate` computes and returns `{"verdict":"continue|stop"}`.
+
+> Tune the caps to your plan. You can't read the real account rate-limit % from
+> inside Claude Code — so the budget is measured **locally** against a number you
+> set.
 
 ---
 
-## Instalação
+## Safety (hard rules)
 
-A skill precisa ficar em `~/.claude/skills/autopilot/` (user-level, disponível em
-qualquer projeto) ou em `<repo>/.claude/skills/autopilot/` (por projeto).
+- **Never** merges to the default branch. **Never** force-pushes. Only
+  commits/pushes to the `autopilot/<timestamp>` branch — **you do the merge**.
+- **1 fix per tick** (bounded cost).
+- **Kill switch:** `status=stopped` halts everything. `/autopilot stop` kills the cron.
+- Respects the repo's conventions (commit style, CLAUDE.md/AGENTS.md).
+- Never touches secrets / `.env` / production. Local stack/DB only.
+- Stops by itself on anything weird (abnormal burn, repeated error with no progress).
+
+---
+
+## Install
+
+The skill must live in `~/.claude/skills/autopilot/` (user-level, available in any
+project) or in `<repo>/.claude/skills/autopilot/` (per project).
 
 ```bash
 git clone https://github.com/Huakson/autopilot.git
 cd autopilot
-./install.sh            # copia pra ~/.claude/skills/autopilot/
+./install.sh            # copies into ~/.claude/skills/autopilot/
 ```
 
-Ou manual:
+Or manually:
 ```bash
 mkdir -p ~/.claude/skills/autopilot/scripts
 cp SKILL.md ~/.claude/skills/autopilot/SKILL.md
@@ -116,55 +116,55 @@ cp scripts/autopilot.py ~/.claude/skills/autopilot/scripts/autopilot.py
 chmod +x ~/.claude/skills/autopilot/scripts/autopilot.py
 ```
 
-Requisitos: **Claude Code** (com o tool `CronCreate`), **Python 3** (stdlib só),
-`git`. Nada de dependência externa.
+Requirements: **Claude Code** (with the `CronCreate` tool), **Python 3** (stdlib
+only), `git`. No external dependencies.
 
 ---
 
-## Uso
+## Usage
 
 ### 1. Setup
-No Claude Code, dentro do projeto que você quer testar:
+In Claude Code, inside the project you want to test:
 ```
 /autopilot setup
 ```
-Ele pergunta (ou usa defaults):
-- teto diário de tokens (default 30.000.000)
-- teto semanal (default 150.000.000)
-- cron (default `0 * * * *` = de hora em hora)
-- **targets**: os comandos que ele roda por tick (ex: `go test ./...`,
-  `npm test`, `pytest -q`, um spec Playwright, um fluxo-chave)
+It asks (or uses defaults):
+- daily token cap (default 30,000,000)
+- weekly token cap (default 150,000,000)
+- cron (default `0 * * * *` = hourly)
+- **targets**: the commands to run each tick (e.g. `go test ./...`, `npm test`,
+  `pytest -q`, a Playwright spec, a key user flow)
 
-Aí ele: confirma tree limpo → cria branch `autopilot/<data-hora>` → grava o state
-→ arma o cron → roda o 1º tick.
+Then it: confirms a clean tree → creates branch `autopilot/<date-time>` → writes
+the state → arms the cron → runs the first tick.
 
-### 2. Deixa rodando
-O cron dispara `/autopilot tick` no intervalo configurado. Cada tick:
-1. `gate` mede tokens e decide.
-2. `stop` → mata o cron, reporta, fim.
-3. `continue` → roda 1 target (rotaciona); se falhar, corrige → re-roda até verde
-   → commita/pusha na branch.
+### 2. Let it run
+The cron fires `/autopilot tick` at the configured interval. Each tick:
+1. `gate` measures tokens and decides.
+2. `stop` → kills the cron, reports, ends.
+3. `continue` → runs 1 target (rotating); if it fails, fixes → re-runs until green
+   → commits/pushes to the branch.
 
-### 3. Acompanha / para
+### 3. Watch / stop
 ```
-/autopilot status    # resumo
-/autopilot stop      # para tudo
+/autopilot status    # summary
+/autopilot stop      # stop everything
 ```
 
-### 4. Resume (sessão morreu)
-Reabriu o Claude Code? `/autopilot tick` retoma do `state.json` (o gate decide se
-ainda há budget) e re-arma o cron se preciso.
+### 4. Resume (session died)
+Reopened Claude Code? `/autopilot tick` resumes from `state.json` (the gate decides
+whether budget remains) and re-arms the cron if needed.
 
 ---
 
-## Comandos do motor (`autopilot.py`)
+## Engine commands (`autopilot.py`)
 
-Normalmente você não chama direto (a skill chama), mas pra debug:
+You normally don't call these directly (the skill does), but for debugging:
 
 ```bash
 ENGINE=~/.claude/skills/autopilot/scripts/autopilot.py
 
-python3 $ENGINE tokens                       # total de tokens medido agora
+python3 $ENGINE tokens                       # token total measured now
 python3 $ENGINE init --daily 30000000 --weekly 150000000 \
         --cron "0 * * * *" --branch autopilot/2026-05-30-1200 \
         --target "go test ./..." --target "npm test"
@@ -175,17 +175,17 @@ python3 $ENGINE stop --reason "manual"
 python3 $ENGINE set-cron --cron-job-id <id>
 ```
 
-State default: `./.claude/autopilot/state.json` (override com `--state`).
+Default state path: `./.claude/autopilot/state.json` (override with `--state`).
 
-### Métrica de token
-`input + output + cache_creation` somados em `~/.claude/projects/<cwd-encoded>/*.jsonl`.
-O cwd é codificado trocando `/` e `.` por `-` (ex:
-`/Users/x/proj/.claude/wt` → `-Users-x-proj--claude-wt`). `cache_read` entra só
-com `--include-cache-read`.
+### Token metric
+`input + output + cache_creation` summed across
+`~/.claude/projects/<cwd-encoded>/*.jsonl`. The cwd is encoded by replacing `/` and
+`.` with `-` (e.g. `/Users/x/proj/.claude/wt` → `-Users-x-proj--claude-wt`).
+`cache_read` is added only with `--include-cache-read`.
 
 ---
 
-## Estado (`state.json`)
+## State (`state.json`)
 
 ```json
 {
@@ -214,42 +214,42 @@ com `--include-cache-read`.
 }
 ```
 
-> Runtime — **não versionar**. Adicione `.claude/autopilot/` ao `.gitignore` do
-> seu projeto.
+> Runtime artifact — **do not commit**. Add `.claude/autopilot/` to your project's
+> `.gitignore`.
 
 ---
 
-## Adaptando pro seu projeto
+## Adapting to your project
 
-A skill é genérica: os comandos de teste são os **targets** que você passa no
-setup. Exemplos:
+The skill is generic: the test commands are the **targets** you pass at setup.
+Examples:
 - Go: `--target "go test ./..."`
-- Node: `--target "npm test"` ou `--target "npx playwright test e2e/foo.spec.ts"`
+- Node: `--target "npm test"` or `--target "npx playwright test e2e/foo.spec.ts"`
 - Python: `--target "pytest -q"`
-- Fluxo-chave: descreva como um passo que o Claude executa (ele segue o SKILL.md).
+- Key flow: describe it as a step the model executes (it follows SKILL.md).
 
-Quer mudar tetos/cron/safety? Edite `config` no setup ou o `SKILL.md`.
+Want to change caps/cron/safety? Edit `config` at setup, or `SKILL.md`.
 
 ---
 
 ## Caveats
 
-- **Queima contexto rápido.** Em planos com teto, as guardas (90%/80%) cortam
-  antes do limite, mas dê `/autopilot status` de vez em quando.
-- O cron some se a sessão morrer — use o RESUME.
-- 1 fix por tick é proposital (custo previsível). Pra mais throughput, ajuste o
-  intervalo do cron (não o nº de fixes).
-- Roda contra stack/DB **local**. Não aponte pra produção.
+- **Burns context fast.** On capped plans the guards (90%/80%) cut before the
+  limit, but check `/autopilot status` now and then.
+- The cron dies if the session dies — use RESUME.
+- 1 fix per tick is intentional (predictable cost). For more throughput, tune the
+  cron interval (not the fix count).
+- Runs against your **local** stack/DB. Don't point it at production.
 
 ---
 
-## Créditos
+## Credits
 
-Padrão original (state file + cron + dogfood) por
+Original pattern (state file + cron + dogfooding) by
 [Bruno Bertolini](https://gist.github.com/brunobertolini/d583141b9909909eeaba6273ff87cdc0).
-Esta versão adiciona as guardas de budget (90% diário / 80% semanal), motor
-determinístico de contagem de token e regras de safety (branch isolada, sem merge).
+This version adds the budget guards (90% daily / 80% weekly), a deterministic
+token-counting engine, and safety rules (isolated branch, no merge).
 
-## Licença
+## License
 
-MIT — veja [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
