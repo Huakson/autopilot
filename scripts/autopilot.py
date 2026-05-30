@@ -126,7 +126,9 @@ def cmd_init(args) -> int:
             "include_cache_read": bool(args.include_cache_read),
             "targets": args.target or [],
             "use_claude_mem": bool(args.use_claude_mem),
+            "stop_when_missions_done": bool(args.stop_when_missions_done),
         },
+        "missions": [],
         "counters": {"ticks": 0, "bugs_found": 0, "bugs_fixed": 0},
         "budget": {
             "day": iso_day(now),
@@ -256,6 +258,84 @@ def cmd_set_cron(args) -> int:
     save_state(args.state, state)
     print(json.dumps({"ok": True, "cron_job_id": args.cron_job_id}, ensure_ascii=False))
     return 0
+
+
+# ----------------------------------------------------------------------------
+# Missions — a finite queue of objectives to validate, consumed one per tick.
+# Each mission: {id, goal, status: pending|done|failed, ts, done_ts, note}.
+# The tick takes the next pending mission first; when the queue is empty it
+# falls back to the regression targets (unless stop_when_missions_done).
+# ----------------------------------------------------------------------------
+
+def _next_mission_num(missions) -> int:
+    return (max([m.get("num", 0) for m in missions], default=0)) + 1
+
+
+def cmd_mission(args) -> int:
+    state = load_state(args.state)
+    missions = state.setdefault("missions", [])
+    sub = args.mi_cmd
+
+    if sub == "add":
+        goals = []
+        if args.goal:
+            goals = [args.goal]
+        else:  # stdin: one mission per non-empty line
+            goals = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+        added = []
+        for g in goals:
+            num = _next_mission_num(missions)
+            m = {"num": num, "id": f"m{num}", "goal": g, "status": "pending",
+                 "ts": now_utc().isoformat(), "done_ts": "", "note": ""}
+            missions.append(m)
+            added.append(m["id"])
+        save_state(args.state, state)
+        print(json.dumps({"ok": True, "added": added, "count": len(missions)}, ensure_ascii=False))
+        return 0
+
+    if sub == "list":
+        print(json.dumps({
+            "count": len(missions),
+            "pending": sum(1 for m in missions if m["status"] == "pending"),
+            "done": sum(1 for m in missions if m["status"] == "done"),
+            "failed": sum(1 for m in missions if m["status"] == "failed"),
+            "missions": missions,
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    if sub == "next":
+        nxt = next((m for m in missions if m["status"] == "pending"), None)
+        print(json.dumps({"mission": nxt}, ensure_ascii=False))
+        return 0
+
+    if sub in ("done", "fail"):
+        for m in missions:
+            if m["id"] == args.id:
+                m["status"] = "done" if sub == "done" else "failed"
+                m["done_ts"] = now_utc().isoformat()
+                m["note"] = args.note or ""
+                save_state(args.state, state)
+                print(json.dumps({"ok": True, "id": args.id, "status": m["status"]}, ensure_ascii=False))
+                return 0
+        print(f"not found: {args.id}", file=sys.stderr)
+        return 1
+
+    if sub == "rm":
+        before = len(missions)
+        state["missions"] = [m for m in missions if m["id"] != args.id]
+        save_state(args.state, state)
+        ok = len(state["missions"]) < before
+        print(json.dumps({"ok": ok, "id": args.id}, ensure_ascii=False))
+        return 0 if ok else 1
+
+    if sub == "clear":
+        state["missions"] = [m for m in missions if m["status"] != "pending"] if args.done_only else []
+        save_state(args.state, state)
+        print(json.dumps({"ok": True, "remaining": len(state["missions"])}, ensure_ascii=False))
+        return 0
+
+    print("unknown mission subcommand", file=sys.stderr)
+    return 2
 
 
 # ----------------------------------------------------------------------------
@@ -389,6 +469,8 @@ def main() -> int:
     pi.add_argument("--cron-job-id", default="")
     pi.add_argument("--include-cache-read", action="store_true")
     pi.add_argument("--use-claude-mem", action="store_true")
+    pi.add_argument("--stop-when-missions-done", action="store_true",
+                    help="parar quando a fila de missions esvaziar (em vez de cair pra regressão)")
     pi.add_argument("--state", default=DEFAULT_STATE)
     pi.set_defaults(func=cmd_init)
 
@@ -442,6 +524,31 @@ def main() -> int:
     kse.add_argument("query")
     kse.add_argument("--dir", default=DEFAULT_KNOWLEDGE_DIR)
     pk.set_defaults(func=cmd_knowledge)
+
+    pm = sub.add_parser("mission", help="fila de objetivos validados 1 por tick")
+    msub = pm.add_subparsers(dest="mi_cmd", required=True)
+    ma = msub.add_parser("add")
+    ma.add_argument("--goal", default=None, help="objetivo; omitido = lê do stdin (1 por linha)")
+    ma.add_argument("--state", default=DEFAULT_STATE)
+    ml = msub.add_parser("list")
+    ml.add_argument("--state", default=DEFAULT_STATE)
+    mn = msub.add_parser("next")
+    mn.add_argument("--state", default=DEFAULT_STATE)
+    md = msub.add_parser("done")
+    md.add_argument("id")
+    md.add_argument("--note", default="")
+    md.add_argument("--state", default=DEFAULT_STATE)
+    mf = msub.add_parser("fail")
+    mf.add_argument("id")
+    mf.add_argument("--note", default="")
+    mf.add_argument("--state", default=DEFAULT_STATE)
+    mr = msub.add_parser("rm")
+    mr.add_argument("id")
+    mr.add_argument("--state", default=DEFAULT_STATE)
+    mc = msub.add_parser("clear")
+    mc.add_argument("--done-only", action="store_true", help="limpa só as concluídas/falhas, mantém pendentes")
+    mc.add_argument("--state", default=DEFAULT_STATE)
+    pm.set_defaults(func=cmd_mission)
 
     args = p.parse_args()
     if not hasattr(args, "include_cache_read"):

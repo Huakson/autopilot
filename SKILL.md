@@ -34,6 +34,7 @@ Extended with **budget guards** (90% daily / 80% weekly).
 - `stop` → **STOP**
 - `status` → **STATUS**
 - `knowledge ...` → **KNOWLEDGE** (static curated knowledge base)
+- `mission ...` → **MISSION** (finite queue of objectives to validate, 1/tick)
 
 ## Memory model (two complementary layers)
 - **Knowledge base (local, always on)**: static curated facts that must NOT be
@@ -86,6 +87,10 @@ Extended with **budget guards** (90% daily / 80% weekly).
    - **Seed the knowledge base**: offer to capture key local know-how now
      (how to start the stack / run tests / use NATS, etc) via
      `knowledge add` — so the loop has it from tick 1.
+   - **Missions (optional)**: ask if the user has a list of objectives to validate
+     (a checklist of flows/scenarios/bugs). If yes, add each via `mission add`, and
+     ask whether to **stop when the queue drains** (`--stop-when-missions-done` on
+     init) or fall back to regression after.
 2. **Clean tree + branch**: confirm `git status` clean; create the branch from
    the default branch: `git switch <default> && git switch -c autopilot/<YYYY-MM-DD-HHMM>`.
 3. **Init state**:
@@ -113,12 +118,23 @@ Extended with **budget guards** (90% daily / 80% weekly).
    - **DONE. Do nothing else this tick.**
 3. If `verdict == "continue"`:
    1. `git switch <branch from state>` (ensure on the autopilot branch; never on the default branch).
-   2. **Pick 1 target** by rotating: `targets[ ticks % len(targets) ]`.
-   3. **Run** it.
-      - **Passed** → `python3 $ENGINE log --note "<target> ok"` → **end tick**.
-      - **Failed / bug** → use the `systematic-debugging` discipline → fix the root
-        cause → re-run until **green** → commit (repo style) → `git push origin <branch>`
-        → `python3 $ENGINE log --note "fix: <summary>" --bug --fixed --commit <sha>`.
+   2. **Pick the work for this tick — missions take priority over regression:**
+      - `python3 $ENGINE mission next` → if it returns a `mission` (non-null),
+        **that is the tick's objective**. Do exactly what the `goal` says (validate
+        a flow, test a scenario, reproduce/verify a bug), using the knowledge base
+        + targets as needed.
+        - Objective met / validated OK → `python3 $ENGINE mission done <id> --note "<result>"`.
+        - Found a bug → fix root cause (`systematic-debugging`) → green → commit →
+          `git push origin <branch>` → `python3 $ENGINE mission done <id> --note "fixed: <summary>"`
+          (or `mission fail <id> --note "<why>"` if it couldn't be resolved this tick).
+      - If `mission next` returns `null` (empty queue):
+        - if `config.stop_when_missions_done` is true → run **STOP** (queue drained).
+        - else → fall back to **regression**: pick `targets[ ticks % len(targets) ]`, run it.
+   3. **Run / act on the chosen work.**
+      - **Passed / validated** → `python3 $ENGINE log --note "<what> ok"` → **end tick**.
+      - **Failed / bug** → `systematic-debugging` → fix → re-run until **green** →
+        commit (repo style) → `git push origin <branch>` →
+        `python3 $ENGINE log --note "fix: <summary>" --bug --fixed --commit <sha>`.
    4. **Capture durable lessons**: if you learned something that must not be lost
       (a setup step, a gotcha, a non-obvious fix), save it:
       `python3 $ENGINE knowledge add --by claude --title "..." --tags "..." --body "..."`.
@@ -135,7 +151,30 @@ Extended with **budget guards** (90% daily / 80% weekly).
 
 ## STATUS
 `python3 $ENGINE status` → summarize in 1 paragraph: status, branch, ticks, bugs
-found/fixed, % of daily and weekly budget used.
+found/fixed, % of daily and weekly budget used. Also run `python3 $ENGINE
+mission list` and report the mission queue (pending/done/failed).
+
+## MISSION  (`/autopilot mission ...`)
+
+A **finite queue of objectives** to validate, consumed **one per tick** (missions
+take priority over the regression targets). Use this to drive the autonomous runs
+toward specific goals ("validate the export returns a zip", "test copilot first
+message", "reproduce bug #123") instead of only re-running the test suite.
+
+- `add`  → `python3 $ENGINE mission add --goal "<objective>"`
+           (omit `--goal` to read MANY at once from stdin, one objective per line)
+- `list` → `python3 $ENGINE mission list`   (counts + each item's status)
+- `next` → `python3 $ENGINE mission next`   (the next pending objective, or null)
+- `done` → `python3 $ENGINE mission done <id> --note "<result>"`
+- `fail` → `python3 $ENGINE mission fail <id> --note "<why>"`
+- `rm`   → `python3 $ENGINE mission rm <id>`
+- `clear`→ `python3 $ENGINE mission clear [--done-only]`
+
+When the user says "run these objectives", "validate this list", "add a mission",
+or pastes a checklist, turn each item into a mission. The tick picks the next
+pending one, does it, and marks it done/failed. When the queue is empty the loop
+falls back to regression targets — unless `config.stop_when_missions_done` is set
+(then it stops once drained).
 
 ## KNOWLEDGE  (`/autopilot knowledge ...`)
 
