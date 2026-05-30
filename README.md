@@ -9,6 +9,8 @@ Inspired by [@brunobertolini](https://gist.github.com/brunobertolini/d583141b990
 pattern (on-disk state file + self-contained prompt fired by cron + dogfooding
 skills), with **budget guards** added on top.
 
+> **Full command reference & step-by-step:** [COMMANDS.md](COMMANDS.md)
+
 ---
 
 ## TL;DR
