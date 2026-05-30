@@ -1,0 +1,5 @@
+# Runtime state do autopilot (não versionar)
+.claude/autopilot/
+state.json
+__pycache__/
+*.pyc
