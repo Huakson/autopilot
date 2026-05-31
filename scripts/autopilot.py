@@ -35,6 +35,7 @@ import sys
 
 DEFAULT_STATE = os.path.join(os.getcwd(), ".claude", "autopilot", "state.json")
 DEFAULT_KNOWLEDGE_DIR = os.path.join(os.getcwd(), ".claude", "autopilot", "knowledge")
+DEFAULT_LEDGER = os.path.join(os.getcwd(), ".claude", "autopilot", "experiments.json")
 
 
 def transcript_dir() -> str:
@@ -453,6 +454,123 @@ def cmd_knowledge(args) -> int:
     return 2
 
 
+# ----------------------------------------------------------------------------
+# Experiment ledger — reproducible record of benchmark runs for comparative
+# studies (e.g. AODV-EN vs flooding). Each run captures algo + params + metrics
+# so the comparison step is data-driven instead of recalled from memory.
+# Stored as a JSON list on disk (.claude/autopilot/experiments.json).
+# Each run: {num, id, algo, params{}, metrics{}, note, ts}.
+# ----------------------------------------------------------------------------
+
+def _load_ledger(path: str) -> list:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        try:
+            data = json.load(fh)
+        except Exception:
+            return []
+    return data if isinstance(data, list) else []
+
+
+def _save_ledger(path: str, runs: list) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(runs, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _parse_kv(pairs):
+    out = {}
+    for item in pairs or []:
+        if "=" not in item:
+            continue
+        k, v = item.split("=", 1)
+        k, v = k.strip(), v.strip()
+        try:
+            num = float(v)
+            out[k] = int(num) if num.is_integer() else num
+        except ValueError:
+            out[k] = v
+    return out
+
+
+def _mean(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    return round(sum(nums) / len(nums), 4) if nums else None
+
+
+def cmd_experiment(args) -> int:
+    path = args.ledger
+    runs = _load_ledger(path)
+    sub = args.ex_cmd
+
+    if sub == "add":
+        num = (max([r.get("num", 0) for r in runs], default=0)) + 1
+        run = {
+            "num": num,
+            "id": f"e{num}",
+            "algo": args.algo,
+            "params": _parse_kv(args.param),
+            "metrics": _parse_kv(args.metric),
+            "note": args.note or "",
+            "ts": now_utc().isoformat(),
+        }
+        runs.append(run)
+        _save_ledger(path, runs)
+        print(json.dumps({"ok": True, "id": run["id"], "algo": run["algo"],
+                          "metrics": run["metrics"], "count": len(runs)}, ensure_ascii=False))
+        return 0
+
+    if sub == "list":
+        algos = sorted({r.get("algo", "") for r in runs})
+        print(json.dumps({"count": len(runs), "algos": algos, "runs": runs},
+                         indent=2, ensure_ascii=False))
+        return 0
+
+    if sub == "compare":
+        a, b = args.algo_a, args.algo_b
+        runs_a = [r for r in runs if r.get("algo") == a]
+        runs_b = [r for r in runs if r.get("algo") == b]
+        keys = sorted({k for r in runs_a + runs_b for k in r.get("metrics", {})})
+        rows = {}
+        for k in keys:
+            mean_a = _mean([r["metrics"].get(k) for r in runs_a if k in r.get("metrics", {})])
+            mean_b = _mean([r["metrics"].get(k) for r in runs_b if k in r.get("metrics", {})])
+            delta = pct = None
+            if isinstance(mean_a, (int, float)) and isinstance(mean_b, (int, float)):
+                delta = mean_b - mean_a
+                pct = round(delta / mean_a * 100, 2) if mean_a else None
+            rows[k] = {a: mean_a, b: mean_b, "delta_b_minus_a": delta, "pct_change": pct}
+        print(json.dumps({
+            "a": a, "b": b,
+            "runs_a": len(runs_a), "runs_b": len(runs_b),
+            "metrics": rows,
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    if sub == "rm":
+        before = len(runs)
+        runs = [r for r in runs if r.get("id") != args.id]
+        _save_ledger(path, runs)
+        ok = len(runs) < before
+        print(json.dumps({"ok": ok, "id": args.id}, ensure_ascii=False))
+        return 0 if ok else 1
+
+    if sub == "clear":
+        if args.algo:
+            runs = [r for r in runs if r.get("algo") != args.algo]
+        else:
+            runs = []
+        _save_ledger(path, runs)
+        print(json.dumps({"ok": True, "remaining": len(runs)}, ensure_ascii=False))
+        return 0
+
+    print("unknown experiment subcommand", file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="autopilot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -549,6 +667,30 @@ def main() -> int:
     mc.add_argument("--done-only", action="store_true", help="limpa só as concluídas/falhas, mantém pendentes")
     mc.add_argument("--state", default=DEFAULT_STATE)
     pm.set_defaults(func=cmd_mission)
+
+    pe = sub.add_parser("experiment", help="ledger reprodutível de runs de benchmark")
+    esub = pe.add_subparsers(dest="ex_cmd", required=True)
+    ea = esub.add_parser("add")
+    ea.add_argument("--algo", required=True, help="nome do algoritmo/variante (ex: aodv-en, flooding)")
+    ea.add_argument("--metric", action="append", default=[],
+                    help="k=v repetível (ex: --metric pdr=0.94 --metric latency_ms=120)")
+    ea.add_argument("--param", action="append", default=[],
+                    help="k=v repetível do setup (ex: --param topo=grid-50 --param seed=7)")
+    ea.add_argument("--note", default="")
+    ea.add_argument("--ledger", default=DEFAULT_LEDGER)
+    el = esub.add_parser("list")
+    el.add_argument("--ledger", default=DEFAULT_LEDGER)
+    ec = esub.add_parser("compare")
+    ec.add_argument("algo_a")
+    ec.add_argument("algo_b")
+    ec.add_argument("--ledger", default=DEFAULT_LEDGER)
+    er = esub.add_parser("rm")
+    er.add_argument("id")
+    er.add_argument("--ledger", default=DEFAULT_LEDGER)
+    ecl = esub.add_parser("clear")
+    ecl.add_argument("--algo", default=None, help="limpa só esse algo; omitido = limpa tudo")
+    ecl.add_argument("--ledger", default=DEFAULT_LEDGER)
+    pe.set_defaults(func=cmd_experiment)
 
     args = p.parse_args()
     if not hasattr(args, "include_cache_read"):

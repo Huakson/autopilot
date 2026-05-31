@@ -35,6 +35,7 @@ Extended with **budget guards** (90% daily / 80% weekly).
 - `status` → **STATUS**
 - `knowledge ...` → **KNOWLEDGE** (static curated knowledge base)
 - `mission ...` → **MISSION** (finite queue of objectives to validate, 1/tick)
+- `experiment ...` → **EXPERIMENT** (reproducible ledger of benchmark runs)
 
 ## Memory model (two complementary layers)
 - **Knowledge base (local, always on)**: static curated facts that must NOT be
@@ -63,6 +64,11 @@ Extended with **budget guards** (90% daily / 80% weekly).
    repo you didn't expect, infinite flaky test) → run `STOP` and report. Kill the
    session if burn looks strange (this mode eats context fast).
 6. Never touch secrets / `.env` / production data. Local stack/DB only.
+7. **Never commit heavy/binary artifacts** (raw benchmark dumps, large datasets,
+   generated charts/images, build outputs). Keep them under a gitignored dir
+   (e.g. `results/`); commit only source, the experiment **ledger** (JSON), and a
+   small written summary. If a target produces big files, add the dir to
+   `.gitignore` before committing.
 
 ---
 
@@ -175,6 +181,30 @@ or pastes a checklist, turn each item into a mission. The tick picks the next
 pending one, does it, and marks it done/failed. When the queue is empty the loop
 falls back to regression targets — unless `config.stop_when_missions_done` is set
 (then it stops once drained).
+
+## EXPERIMENT  (`/autopilot experiment ...`)
+
+A **reproducible ledger of benchmark runs** for comparative studies (e.g.
+AODV-EN vs a controlled-flooding algorithm). Each run records the algorithm/variant
++ its setup params + the measured metrics, so the comparison step is **data-driven**
+instead of recalled from memory. Backed by a JSON file on disk
+(`.claude/autopilot/experiments.json`). Use this whenever a mission's goal is to
+"run a benchmark", "collect metrics", or "compare algorithms".
+
+- `add` → `python3 $ENGINE experiment add --algo <name> [--param k=v ...] [--metric k=v ...] [--note "..."]`
+          (numeric values are stored as numbers so `compare` can average them)
+- `list` → `python3 $ENGINE experiment list`   (all runs + the distinct algos)
+- `compare` → `python3 $ENGINE experiment compare <algoA> <algoB>`
+          (per-metric mean for each algo + `delta_b_minus_a` + `pct_change`)
+- `rm` → `python3 $ENGINE experiment rm <id>`
+- `clear` → `python3 $ENGINE experiment clear [--algo <name>]`
+
+**In a tick** (when a mission says to benchmark): run the benchmark target,
+then `experiment add` one entry per run (vary `--param seed=...` across runs for
+statistical validity). When a mission says to compare, call `experiment compare`
+and write the resulting numbers into the report — never eyeball them. Keep raw
+dumps/charts in a gitignored `results/` dir (safety rule 7); commit only the
+ledger JSON + the written summary.
 
 ## KNOWLEDGE  (`/autopilot knowledge ...`)
 
