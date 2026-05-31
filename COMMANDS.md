@@ -58,6 +58,7 @@ Verify: open Claude Code, type `/autopilot` — it should appear in the skill li
 | `/autopilot stop` | STOP | kills cron, marks stopped |
 | `/autopilot knowledge ...` | KNOWLEDGE | curated facts (see §5) |
 | `/autopilot mission ...` | MISSION | objective queue (see §6) |
+| `/autopilot experiment ...` | EXPERIMENT | benchmark ledger (see §6.5) |
 
 ---
 
@@ -222,6 +223,57 @@ In chat: paste a checklist and say "run these objectives" — each line becomes 
 
 ---
 
+## 6.5 Experiments — benchmark ledger (`/autopilot experiment ...`)
+
+A **reproducible ledger of benchmark runs** for comparative studies — e.g.
+comparing a routing algorithm (`aodv-en`) against a controlled-flooding baseline.
+Each run records the variant + setup params + measured metrics, so the comparison
+is **data-driven** (averaged across runs), not eyeballed. Stored as JSON on disk:
+`.claude/autopilot/experiments.json`.
+
+```bash
+# record runs (vary --param seed for statistical validity; numbers stored as numbers)
+python3 $ENGINE experiment add --algo aodv-en  --param topo=grid-50 --param seed=7 \
+  --metric pdr=0.94 --metric latency_ms=120 --metric overhead=1.8
+python3 $ENGINE experiment add --algo aodv-en  --param topo=grid-50 --param seed=8 \
+  --metric pdr=0.92 --metric latency_ms=130 --metric overhead=1.9
+python3 $ENGINE experiment add --algo flooding --param topo=grid-50 --param seed=7 \
+  --metric pdr=0.99 --metric latency_ms=210 --metric overhead=4.5
+
+python3 $ENGINE experiment list                      # all runs + distinct algos
+python3 $ENGINE experiment compare aodv-en flooding  # per-metric mean + delta + %
+python3 $ENGINE experiment rm e2                      # drop one run
+python3 $ENGINE experiment clear --algo flooding      # drop one algo (omit --algo = wipe all)
+```
+
+`compare` output (means averaged over each algo's runs):
+
+```json
+{
+  "a": "aodv-en", "b": "flooding", "runs_a": 2, "runs_b": 1,
+  "metrics": {
+    "pdr":        { "aodv-en": 0.93, "flooding": 0.99, "delta_b_minus_a": 0.06, "pct_change": 6.45 },
+    "latency_ms": { "aodv-en": 125,  "flooding": 210,  "delta_b_minus_a": 85,   "pct_change": 68.0 },
+    "overhead":   { "aodv-en": 1.85, "flooding": 4.5,  "delta_b_minus_a": 2.65, "pct_change": 143.24 }
+  }
+}
+```
+
+**Pair with missions:** one mission "run the benchmark N times, `experiment add`
+each run", another "`experiment compare` and write the results section". Keep raw
+dumps/charts in a **gitignored `results/` dir** — commit only the ledger JSON +
+the written summary (safety: never commit heavy binaries).
+
+| sub | command |
+|---|---|
+| add | `experiment add --algo NAME [--param k=v]... [--metric k=v]... [--note "..."] [--ledger PATH]` |
+| list | `experiment list [--ledger PATH]` |
+| compare | `experiment compare <algoA> <algoB> [--ledger PATH]` |
+| rm | `experiment rm <id> [--ledger PATH]` |
+| clear | `experiment clear [--algo NAME] [--ledger PATH]` |
+
+---
+
 ## 7. Budget — how the guard works
 
 - **Metric:** `input + output + cache_creation` tokens, summed across every `.jsonl`
@@ -292,6 +344,9 @@ EOF
 4. Follows the repo's conventions (commit style, CLAUDE.md/AGENTS.md).
 5. Stops on anything weird (abnormal burn, repeated error, dirty repo).
 6. Never touches secrets / `.env` / production — local stack/DB only.
+7. Never commits heavy/binary artifacts (raw dumps, charts, datasets) — keep them
+   in a gitignored `results/` dir; commit only source, the ledger JSON, and a
+   small written summary.
 
 ---
 
@@ -330,5 +385,6 @@ EOF
 }
 ```
 Knowledge entries live separately as markdown in `.claude/autopilot/knowledge/*.md`.
-Both are runtime — gitignore `.claude/autopilot/`.
+The experiment ledger lives in `.claude/autopilot/experiments.json`.
+All are runtime — gitignore `.claude/autopilot/`.
 ```
